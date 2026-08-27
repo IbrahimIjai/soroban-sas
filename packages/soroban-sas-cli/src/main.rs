@@ -59,14 +59,35 @@ fn emit_error(output: OutputFormat, message: &str) {
 }
 
 /// Client-side schema syntax check (issue #26), mirroring
-/// `soroban_sas_common::validate_schema_syntax`: a schema must be non-empty
-/// and at most 1024 bytes. Runs before any transaction is built or
-/// simulated, so an invalid schema fails fast with no RPC round-trip and no
-/// simulation fee.
+/// `soroban_sas_common::validate_schema_syntax`: a schema must be a
+/// comma-separated list of `name Type` pairs, be non-empty, and stay within
+/// the 1024-byte cap. Runs before any transaction is built or simulated, so
+/// an invalid schema fails fast with no RPC round-trip and no simulation fee.
 const MAX_SCHEMA_LENGTH: usize = 1024;
 
+fn is_valid_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
+        _ => return false,
+    }
+
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn is_valid_type(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value.chars().any(|c| c.is_ascii_alphabetic())
+        && value.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(c, '_' | '<' | '>' | '[' | ']' | ',' | ':' | '(' | ')' | ' ' | '?')
+        })
+}
+
 fn validate_schema_syntax(schema: &str) -> Result<(), String> {
-    if schema.trim().is_empty() {
+    let schema = schema.trim();
+    if schema.is_empty() {
         return Err("schema is empty: pass a non-empty --schema definition string".to_string());
     }
     if schema.len() > MAX_SCHEMA_LENGTH {
@@ -75,6 +96,34 @@ fn validate_schema_syntax(schema: &str) -> Result<(), String> {
             schema.len()
         ));
     }
+
+    let mut field_count = 0u32;
+    for field in schema.split(',') {
+        let field = field.trim();
+        if field.is_empty() {
+            return Err(
+                "schema must use comma-separated `name Type` field definitions".to_string(),
+            );
+        }
+
+        let Some(split_index) = field.find(char::is_whitespace) else {
+            return Err(
+                "schema must use comma-separated `name Type` field definitions".to_string(),
+            );
+        };
+        let (name, ty) = field.split_at(split_index);
+        if !is_valid_identifier(name.trim()) || !is_valid_type(ty) {
+            return Err(
+                "schema must use comma-separated `name Type` field definitions".to_string(),
+            );
+        }
+        field_count += 1;
+    }
+
+    if field_count == 0 {
+        return Err("schema must define at least one field".to_string());
+    }
+
     Ok(())
 }
 
