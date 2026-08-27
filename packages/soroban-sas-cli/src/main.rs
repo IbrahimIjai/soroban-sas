@@ -65,28 +65,34 @@ fn emit_error(output: OutputFormat, message: &str) {
 /// an invalid schema fails fast with no RPC round-trip and no simulation fee.
 const MAX_SCHEMA_LENGTH: usize = 1024;
 
-fn is_valid_identifier(value: &str) -> bool {
-    let mut chars = value.chars();
-    match chars.next() {
-        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
-        _ => return false,
-    }
-
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+fn is_ascii_whitespace(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\n' | b'\r' | b'\t' | 0x0b | 0x0c)
 }
 
-fn is_valid_type(value: &str) -> bool {
-    let value = value.trim();
-    !value.is_empty()
-        && value.chars().any(|c| c.is_ascii_alphabetic())
-        && value.chars().all(|c| {
-            c.is_ascii_alphanumeric()
-                || matches!(c, '_' | '<' | '>' | '[' | ']' | ',' | ':' | '(' | ')' | ' ' | '?')
-        })
+fn trim_bounds(bytes: &[u8], mut start: usize, mut end: usize) -> Option<(usize, usize)> {
+    while start < end {
+        if !is_ascii_whitespace(bytes[start]) {
+            break;
+        }
+        start += 1;
+    }
+
+    while end > start {
+        if !is_ascii_whitespace(bytes[end - 1]) {
+            break;
+        }
+        end -= 1;
+    }
+
+    if start >= end {
+        None
+    } else {
+        Some((start, end))
+    }
 }
 
 fn validate_schema_syntax(schema: &str) -> Result<(), String> {
-    let schema = schema.trim();
+    let schema = schema.as_bytes();
     if schema.is_empty() {
         return Err("schema is empty: pass a non-empty --schema definition string".to_string());
     }
@@ -97,27 +103,76 @@ fn validate_schema_syntax(schema: &str) -> Result<(), String> {
         ));
     }
 
+    let Some((mut start, end)) = trim_bounds(schema, 0, schema.len()) else {
+        return Err("schema is empty: pass a non-empty --schema definition string".to_string());
+    };
+
     let mut field_count = 0u32;
-    for field in schema.split(',') {
-        let field = field.trim();
-        if field.is_empty() {
+    while start < end {
+        let mut field_end = start;
+        while field_end < end && schema[field_end] != b',' {
+            field_end += 1;
+        }
+
+        let Some((field_start, field_end)) = trim_bounds(schema, start, field_end) else {
+            return Err(
+                "schema must use comma-separated `name Type` field definitions".to_string(),
+            );
+        };
+
+        let mut split_index = field_start;
+        while split_index < field_end && !is_ascii_whitespace(schema[split_index]) {
+            split_index += 1;
+        }
+        if split_index == field_start || split_index >= field_end {
             return Err(
                 "schema must use comma-separated `name Type` field definitions".to_string(),
             );
         }
 
-        let Some(split_index) = field.find(char::is_whitespace) else {
+        let mut ty_start = split_index;
+        while ty_start < field_end && is_ascii_whitespace(schema[ty_start]) {
+            ty_start += 1;
+        }
+        if ty_start >= field_end {
             return Err(
                 "schema must use comma-separated `name Type` field definitions".to_string(),
             );
-        };
-        let (name, ty) = field.split_at(split_index);
-        if !is_valid_identifier(name.trim()) || !is_valid_type(ty) {
+        }
+
+        let name = &schema[field_start..split_index];
+        let ty = &schema[ty_start..field_end];
+        let identifier_ok = !name.is_empty()
+            && (name[0].is_ascii_alphabetic() || name[0] == b'_')
+            && name[1..]
+                .iter()
+                .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_');
+        let type_ok = !ty.is_empty()
+            && ty.iter().any(|byte| byte.is_ascii_alphabetic())
+            && ty.iter().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(
+                        byte,
+                        b'_' | b'<' | b'>' | b'[' | b']' | b',' | b':' | b'(' | b')' | b' ' | b'?'
+                    )
+            });
+        if !identifier_ok || !type_ok {
             return Err(
                 "schema must use comma-separated `name Type` field definitions".to_string(),
             );
         }
         field_count += 1;
+
+        if field_end >= end {
+            break;
+        }
+        start = field_end + 1;
+        while start < end && is_ascii_whitespace(schema[start]) {
+            start += 1;
+        }
+        if start >= end {
+            return Err("schema must use comma-separated `name Type` field definitions".to_string());
+        }
     }
 
     if field_count == 0 {
